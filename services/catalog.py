@@ -1,4 +1,5 @@
 import re
+from pathlib import PurePosixPath
 
 from common.errors import BusinessError
 
@@ -71,19 +72,63 @@ class CatalogService:
         )
         return rows[0]
 
+    @staticmethod
+    def chapter_group(document, version):
+        """优先使用明确项目归属；兼容已有文件夹和带项目名称的系列文件。"""
+        if document.get("project_id"):
+            return "project:" + document["project_id"], document["project_id"]
+        name = PurePosixPath(document["source_name"]).stem
+        project = re.match(r"^(?:\d+[._\s、-]+)?(.+?项目)", name)
+        if project:
+            return "project-name:" + project[1], project[1]
+        parts = PurePosixPath((version or {}).get("source_path") or "").parts
+        if len(parts) > 1:
+            return "folder:" + parts[0], parts[0]
+        return "document:" + document["id"], document["source_name"]
+
     async def sections(self, course_id):
-        documents = await self.repo.find(
-            "documents", {"course_id": course_id, "status": "ready"}, limit=200
-        )
         output = []
-        for document in documents:
-            rows = await self.repo.find(
-                "sections",
-                {"document_id": document["id"], "version_id": document.get("active_version")},
-                limit=500,
-                sort=[("section_index", 1)],
+        document_offset = 0
+        while True:
+            documents = await self.repo.find(
+                "documents",
+                {"course_id": course_id, "status": "ready"},
+                limit=200,
+                offset=document_offset,
+                sort=[("source_name", 1), ("id", 1)],
             )
-            output.extend({**row, "source_name": document["source_name"]} for row in rows)
+            if not documents:
+                break
+            for document in documents:
+                version = await self.repo.get("versions", document.get("active_version"))
+                chapter_id, chapter_title = self.chapter_group(document, version)
+                section_offset = 0
+                while True:
+                    rows = await self.repo.find(
+                        "sections",
+                        {
+                            "document_id": document["id"],
+                            "version_id": document.get("active_version"),
+                        },
+                        limit=500,
+                        offset=section_offset,
+                        sort=[("section_index", 1), ("id", 1)],
+                    )
+                    output.extend(
+                        {
+                            **row,
+                            "source_name": document["source_name"],
+                            "chapter_id": chapter_id,
+                            "chapter_title": chapter_title,
+                        }
+                        for row in rows
+                    )
+                    if len(rows) < 500:
+                        break
+                    section_offset += len(rows)
+            if len(documents) < 200:
+                break
+            document_offset += len(documents)
         return output
 
     @staticmethod

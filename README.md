@@ -26,7 +26,15 @@
 
 ## 聊天语音输入
 
-在 `.env` 中添加 `ZHICHENGAPP_ASR_API_KEY=你的百炼密钥` 并重启应用，默认使用北京地域的 `qwen-audio-3.1-asr-flash`。
+语音识别与聊天复用 `.env` 中的 `ZHICHENGAPP_LLM_API_KEY`，无需重复填写密钥。
+在 `.env` 中分别配置聊天与语音模型，例如：
+
+```dotenv
+ZHICHENGAPP_LLM_MODEL=qwen3.8-flash
+ZHICHENGAPP_ASR_MODEL=qwen-audio-3.1-asr-flash
+```
+
+代码不预设语音模型，未配置 `ZHICHENGAPP_ASR_MODEL` 时语音输入不可用。修改配置后重启应用。
 如使用其他地域或业务空间专属域名，同时设置 `ZHICHENGAPP_ASR_URL` 为该空间的完整接口地址，密钥必须与地域匹配。
 模型和超时可通过 `ZHICHENGAPP_ASR_MODEL`、`ZHICHENGAPP_ASR_TIMEOUT_SECONDS` 配置，详见 `.env.example`。
 
@@ -86,6 +94,24 @@ uv run --extra local-models uvicorn app:app --host 127.0.0.1 --port 8010 --worke
 docker compose --env-file .env -f deploy/compose.yml stop
 ```
 
+
+## 日志
+
+启动应用后，日志同时输出到控制台和项目根目录的 `logs/zhichengapp.log`（UTF-8）。
+记录应用启动/停止、业务日志、请求方法/路径/状态码/耗时及 `request_id`，未处理的请求异常和流式问答异常包含堆栈。
+请求日志不包含查询参数、请求正文或请求头；流式请求的耗时为响应头就绪时间。
+`uvicorn.error` 在日志配置完成后的服务日志也会写入同一文件；Docker 基础服务日志仍用 `docker compose --env-file .env -f deploy/compose.yml logs` 查看。
+
+默认单个文件达到 10 MiB 后自动轮转，保留 5 个备份（`.1` 至 `.5`，`.1` 最新）。
+可在 `.env` 设置 `ZHICHENGAPP_LOG_FILE`、`ZHICHENGAPP_LOG_LEVEL`、`ZHICHENGAPP_LOG_MAX_BYTES` 和 `ZHICHENGAPP_LOG_BACKUP_COUNT`，修改后重启应用。
+默认路径固定在项目目录；自定义相对路径以启动工作目录为准。日志目录已被 Git 忽略。
+本地文件轮转配合上述 `--workers 1` 启动方式使用。
+
+实时查看最近日志：
+
+```powershell
+Get-Content .\logs\zhichengapp.log -Tail 50 -Wait
+```
 
 ## 多格式解析与 MinerU
 

@@ -153,7 +153,7 @@ function documentImages(container,text,document){
   }
 }
 function questionCard(question){const item=node('article',undefined,'item');item.append(node('div',`${question.code} · ${question.question_type}`,'badge'),node('p',question.stem,'question-text'),node('p',question.options||'','question-text'));documentImages(item,(question.stem||'')+'\n'+(question.options||''),question);const answer=node('div',undefined,'solution');answer.hidden=true;item.append(act('查看标准答案与解析',async()=>{const data=await api(`/questions/${encodeURIComponent(question.question_id)}/solution`);answer.textContent=`标准答案：${data.answer}\n解析：${data.explanation}\n审核状态：${data.review_status==='unreviewed'?'尚未人工审核':data.review_status}`;documentImages(answer,data.answer+'\n'+data.explanation,{...question,images:data.images||[]});answer.hidden=false;}),answer);return item;}
-function message(role,text,result={}){const item=node('article',undefined,'message '+role);item.append(node('div',role==='user'?'我的问题':'知成助教','role'));const answer=node('div',text,'answer');item.append(answer);citations(item,result.citations);courseChoices(item,result);for(const question of result.questions||[])item.append(questionCard(question));$('#messages').append(item);$('#messages').scrollTop=$('#messages').scrollHeight;return {item,answer};}
+function message(role,text,result={}){const item=node('article',undefined,'message '+role);item.append(node('div',role==='user'?'我的问题':'知成助教','role'));const answer=node('div',text,'answer');if(role==='assistant')AnswerImages.render(answer,text,result.citations);item.append(answer);citations(item,result.citations);courseChoices(item,result);for(const question of result.questions||[])item.append(questionCard(question));$('#messages').append(item);$('#messages').scrollTop=$('#messages').scrollHeight;return {item,answer};}
 async function allCatalogRows(path){
   const rows=[];
   for(let offset=0;;offset+=200){const data=await api(`${path}?limit=200&offset=${offset}`);rows.push(...data.items);if(data.items.length<200)return rows;}
@@ -203,7 +203,7 @@ async function selectCourse(id){
   $('#course').value=id;state.projectId=null;
   if(id)recentCourses=[id,...recentCourses.filter(c=>c!==id)].slice(0,6);
   try{localStorage.setItem('zhichengapp.recentCourses',JSON.stringify(recentCourses));}catch{}
-  $('#questions').replaceChildren();syncCourse();renderCourses($('#course-search').value);await loadSections();
+  resetQuestions();syncCourse();renderCourses($('#course-search').value);await loadSections();
 }
 function courseCatalogCard(course){
   const selected=course.course_id===$('#course').value;
@@ -316,21 +316,30 @@ function courseChoices(container,result){
   }
   container.append(list);
 }
-let sectionsRequest=0;
-async function loadSections(){
-  const request=++sectionsRequest,parent=$('#sections'),courseId=$('#course').value;
-  parent.replaceChildren();if(!courseId){parent.textContent='先选择课程。';return;}
-  const data=await api(`/courses/${encodeURIComponent(courseId)}/sections`);
-  if(request!==sectionsRequest)return;
-  const groups=new Map();
-  for(const section of data.items){
-    if(!groups.has(section.document_id))groups.set(section.document_id,[]);
-    groups.get(section.document_id).push(section);
-  }
-  for(const rows of groups.values()){
+const learningPageSize=10;
+let sectionsRequest=0,sectionGroups=[],sectionPage=0;
+let questionsRequest=0,questionPage=0,questionFilters=null;
+function renderLearningPager(prefix,page,hasNext,count){
+  const pager=$('#'+prefix+'-pagination');
+  pager.hidden=count===0&&page===0;
+  $('#'+prefix+'-prev').disabled=page===0;
+  $('#'+prefix+'-next').disabled=!hasNext;
+  $('#'+prefix+'-page').textContent=`第 ${page+1} 页 · 每页 ${learningPageSize} 条`;
+}
+function resetQuestions(){
+  ++questionsRequest;questionPage=0;questionFilters=null;
+  $('#questions').replaceChildren();$('#questions-pagination').hidden=true;
+}
+function renderSections(){
+  const parent=$('#sections');parent.replaceChildren();
+  for(const chapter of sectionGroups.slice(sectionPage*learningPageSize,(sectionPage+1)*learningPageSize)){
+    const group=node('details',undefined,'section-document');
+    group.append(node('summary',`${chapter.title} · ${chapter.documents.length} 份资料`));
+    for(const rows of chapter.documents){
     const document=node('details',undefined,'section-document');
-    document.append(node('summary',`${rows[0].source_name||'课程讲义'} · ${rows.length} 个章节`));
+    document.append(node('summary',rows[0].source_name||'课程讲义'));
     const tree=node('ul',undefined,'section-tree'),nodes=new Map();
+    document.append(node('p','章节内容目录','muted'));
     for(const section of rows){
       const li=node('li'),branch=node('details'),children=node('ul');
       branch.append(node('summary',section.title||section.title_path?.at(-1)||'正文'),children);
@@ -344,12 +353,60 @@ async function loadSections(){
       const entry=nodes.get(section.id||section.section_id);
       if(!entry.children.children.length)entry.li.replaceChildren(node('span',section.title||section.title_path?.at(-1)||'正文'));
     }
-    document.append(tree);parent.append(document);
+    document.append(tree);group.append(document);
+    }
+    parent.append(group);
   }
-  if(!data.items.length)parent.textContent='该课程尚无可用讲义章节。';
+  if(!sectionGroups.length)parent.textContent='该课程尚无可用讲义章节。';
+  renderLearningPager('sections',sectionPage,(sectionPage+1)*learningPageSize<sectionGroups.length,sectionGroups.length);
+  if(sectionGroups.length)$('#sections-page').textContent+=` · 共 ${sectionGroups.length} 个章节`;
 }
-$('#course').onchange=()=>{state.projectId=null;syncCourse();loadSections().catch(error=>notice(error.message));};
-$('#search-questions').onclick=async()=>{try{const params=new URLSearchParams({limit:'100'});for(const [key,selector] of [['course_id','#course'],['code','#question-code'],['question_type','#question-type']])if($(selector).value)params.set(key,$(selector).value.trim());const data=await api('/questions?'+params);$('#questions').replaceChildren(...data.items.map(questionCard));if(!data.items.length)$('#questions').append(node('p','当前条件下未找到题目。','muted'));}catch(error){notice(error.message,{tone:'error'});}};
+async function loadSections(){
+  const request=++sectionsRequest,parent=$('#sections'),courseId=$('#course').value;
+  sectionGroups=[];sectionPage=0;$('#sections-pagination').hidden=true;
+  parent.replaceChildren();if(!courseId){parent.textContent='先选择课程。';return;}
+  const data=await api(`/courses/${encodeURIComponent(courseId)}/sections`);
+  if(request!==sectionsRequest)return;
+  const groups=new Map();
+  for(const section of data.items){
+    if(!groups.has(section.document_id))groups.set(section.document_id,[]);
+    groups.get(section.document_id).push(section);
+  }
+  const chapters=new Map();
+  const documents=[...groups.values()].sort((a,b)=>(a[0].source_name||'').localeCompare(b[0].source_name||'','zh-CN',{numeric:true})||a[0].document_id.localeCompare(b[0].document_id));
+  for(const rows of documents){
+    const key=rows[0].chapter_id||rows[0].document_id;
+    if(!chapters.has(key))chapters.set(key,{title:rows[0].chapter_title||rows[0].source_name,documents:[]});
+    chapters.get(key).documents.push(rows);
+  }
+  sectionGroups=[...chapters.values()];
+  renderSections();
+}
+async function loadQuestions(page=0){
+  if(!questionFilters)return;
+  const request=++questionsRequest,params=new URLSearchParams(questionFilters);
+  params.set('limit',String(learningPageSize));params.set('offset',String(page*learningPageSize));
+  const data=await api('/questions?'+params);
+  if(request!==questionsRequest)return;
+  questionPage=page;
+  $('#questions').replaceChildren(...data.items.map(questionCard));
+  if(!data.items.length)$('#questions').append(node('p','当前条件下未找到题目。','muted'));
+  renderLearningPager('questions',page,data.has_more,data.items.length);
+}
+$('#sections-prev').onclick=()=>{if(sectionPage>0){--sectionPage;renderSections();}};
+$('#sections-next').onclick=()=>{if((sectionPage+1)*learningPageSize<sectionGroups.length){++sectionPage;renderSections();}};
+$('#questions-prev').onclick=()=>{if(questionPage>0)loadQuestions(questionPage-1).catch(error=>notice(error.message,{tone:'error'}));};
+$('#questions-next').onclick=()=>loadQuestions(questionPage+1).catch(error=>notice(error.message,{tone:'error'}));
+$('#course').onchange=()=>{state.projectId=null;resetQuestions();syncCourse();loadSections().catch(error=>notice(error.message));};
+$('#search-questions').onclick=async()=>{
+  try{
+    questionFilters=new URLSearchParams();
+    for(const [key,selector] of [['course_id','#course'],['code','#question-code'],['question_type','#question-type']]){
+      const value=$(selector).value.trim();if(value)questionFilters.set(key,value);
+    }
+    await loadQuestions();
+  }catch(error){notice(error.message,{tone:'error'});}
+};
 async function loadSessions(){const data=await api('/sessions');state.sessions=data.items;renderSessions();}
 function renderSessions(){
   const search=$('#session-search').value.trim().toLocaleLowerCase();
@@ -397,7 +454,7 @@ function renderSessions(){
 }
 $('#new-session').onclick=()=>{if(state.busy||state.historyBusy||speechInput?.busy)return;state.session=null;state.projectId=null;$('#messages').replaceChildren();$('#intent').value='auto';syncCourse();view('chat');renderSessions();notice('新对话已准备好。',{target:'#chat-form',tone:'success'});$('#question').focus();};
 // 增量解码并按 SSE 空行分帧；只有 done 才确认完整答案，断流文本不能当最终结果。
-async function readStream(response,rendered){const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='',answer='',ended=false;try{while(true){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true}).replace(/\r\n/g,'\n');let boundary;while((boundary=buffer.indexOf('\n\n'))>=0){const lines=buffer.slice(0,boundary).split('\n');buffer=buffer.slice(boundary+2);const kind=lines.find(line=>line.startsWith('event:'))?.slice(6).trim(),raw=lines.filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trimStart()).join('\n');if(!raw)continue;const pane=$('#messages'),follow=pane.scrollHeight-pane.scrollTop-pane.clientHeight<90;const data=JSON.parse(raw);if(kind==='status'&&!answer)rendered.answer.textContent=data.message;if(kind==='token'){rendered.item.classList.add('provisional');rendered.item.querySelector('.role').textContent='知成助教 · 正在生成，引用待核对';answer+=data.text;rendered.answer.textContent=answer;}if(kind==='done'){ended=true;rendered.item.classList.remove('provisional');rendered.item.querySelector('.role').textContent='知成助教';rendered.answer.textContent=data.result.answer;citations(rendered.item,data.result.citations);courseChoices(rendered.item,data.result);for(const item of data.result.questions||[])rendered.item.append(questionCard(item));}if(follow)pane.scrollTop=pane.scrollHeight;if(kind==='error'){ended=true;throw new Error(data.message);}}}if(!ended)throw new Error('连接中断，本次输出未确认完成。');}finally{reader.releaseLock();}}
+async function readStream(response,rendered){const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='',answer='',ended=false;try{while(true){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true}).replace(/\r\n/g,'\n');let boundary;while((boundary=buffer.indexOf('\n\n'))>=0){const lines=buffer.slice(0,boundary).split('\n');buffer=buffer.slice(boundary+2);const kind=lines.find(line=>line.startsWith('event:'))?.slice(6).trim(),raw=lines.filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trimStart()).join('\n');if(!raw)continue;const pane=$('#messages'),follow=pane.scrollHeight-pane.scrollTop-pane.clientHeight<90;const data=JSON.parse(raw);if(kind==='status'&&!answer)rendered.answer.textContent=data.message;if(kind==='token'){rendered.item.classList.add('provisional');rendered.item.querySelector('.role').textContent='知成助教 · 正在生成，引用待核对';answer+=data.text;rendered.answer.textContent=answer;}if(kind==='done'){ended=true;rendered.item.classList.remove('provisional');rendered.item.querySelector('.role').textContent='知成助教';AnswerImages.render(rendered.answer,data.result.answer,data.result.citations);citations(rendered.item,data.result.citations);courseChoices(rendered.item,data.result);for(const item of data.result.questions||[])rendered.item.append(questionCard(item));}if(follow)pane.scrollTop=pane.scrollHeight;if(kind==='error'){ended=true;throw new Error(data.message);}}}if(!ended)throw new Error('连接中断，本次输出未确认完成。');}finally{reader.releaseLock();}}
 speechInput = ChatSpeech.create({
   button: $('#speech-record'), cancelButton: $('#speech-cancel'), status: $('#speech-status'),
   question: $('#question'), send: $('#send'), isBusy: () => state.busy || state.historyBusy,
@@ -551,7 +608,7 @@ function syncUploadScope(){
   $('#upload-batch-help').textContent='可多选文件或选择整个文件夹；Markdown 引用的本地图片会随正文保存。';
   if(uploadLimits){
     $('#upload-batch-help').textContent+=` 每批最多 ${uploadLimits.max_batch_files} 个文件，合计 ${uploadLimits.max_batch_bytes/(1024*1024)} MB；解压内容上限 ${uploadLimits.max_docx_unpacked_bytes/(1024*1024)} MB。`;
-    $('#upload-batch-help').textContent+=uploadLimits.mineru?' 可识别 PDF、Word、PPT 和图片。':' 当前可导入 Markdown、TXT 和 DOCX；其他格式及图片文字识别暂不可用。';
+    $('#upload-batch-help').textContent+=uploadLimits.mineru?' 可识别 PDF、Word、PPT 和图片；PDF、Word、PPT 单份最多 200 页，超出请自行拆分后上传。':' 当前可导入 Markdown、TXT 和 DOCX；其他格式及图片文字识别暂不可用。';
   }
   $('#manage-scope').textContent=inCourse?($('#content-type').value==='lecture'?'默认按课程讲义处理；上传题库等文件时，可展开资料设置。':'本次按'+types[$('#content-type').value]+'处理，请使用对应格式的文件。'):catalog?'课程目录由大模型识别系列与课程，无需固定标题格式；存在疑问时请先核对识别结果。':kind==='pending'?'先保存原文件，选择课程后再开始整理内容。':kind==='project'?'本次选择的文件将添加到下方填写的项目。':'本次选择的文件将添加到下方所选课程。';
 }
@@ -578,18 +635,21 @@ $('#upload-form').addEventListener('invalid',event=>{
 },true);
 syncUploadScope();
 const stages={recognizing_document:'识别文档与图片',recognizing_questions:'识别题干与答案',recognizing_catalog:'模型识别课程结构',catalog_review:'等待确认目录结构',waiting:'等待处理',starting:'开始处理',parsing:'解析章节',embedding:'生成检索索引',done:'处理完成'};
+function importMessage(message){
+  return String(message).replace(/ZHICHENGAPP_MINERU_API_TOKEN/g,'文件解析服务').replace(/\s*MinerU\s*/gi,'解析服务');
+}
 function renderUploadTask(row,task){
   row.dataset.taskStatus=task.status;
   const reused=row.dataset.reused==='true'?'已有相同资料，复用原任务 · ':'';
   const processing=task.status==='processing'?` · ${stages[task.stage]||task.stage||'处理中'}${Number.isFinite(task.progress)?` · ${task.progress}%`:''}`:'';
-  row.textContent=`${row.dataset.fileName} · ${reused}${names[task.status]||task.status}${processing}${task.error?' · '+task.error:''}`;
+  row.textContent=`${row.dataset.fileName} · ${reused}${names[task.status]||task.status}${processing}${task.error?' · '+importMessage(task.error):''}`;
 }
 async function refreshUploadProgress(tasks){
   const byId=new Map(tasks.items.map(task=>[task.id,task]));
   await Promise.all(Array.from($('#upload-progress').querySelectorAll('[data-task-id]'),async row=>{
     let task=byId.get(row.dataset.taskId);
     if(!task&&!['completed','failed','interrupted','cancelled'].includes(row.dataset.taskStatus)){
-      // 复用的旧任务可能不在最近 50 条记录中，按 ID 获取实际状态。
+      // 任务可能不在当前页中，按 ID 获取实际状态。
       try{task=await api(`/import-tasks/${encodeURIComponent(row.dataset.taskId)}`);}catch{return;}
     }
     if(task&&row.isConnected)renderUploadTask(row,task);
@@ -677,20 +737,46 @@ $('#catalog-review-confirm').onclick=async()=>{
     notice('已启用确认后的目录结构。',{target:'#refresh-manage',tone:'success'});
   }catch(error){notice(error.message,{target:'#catalog-review-panel',tone:'error'});}finally{button.disabled=false;}
 };
-let manageRequest=0;
+const managePageSize=10;
+let manageRequest=0,documentPage=0,taskPage=0;
+async function fetchManagePage(path,page){
+  while(true){
+    const result=await api(`${path}?limit=${managePageSize}&offset=${page*managePageSize}`);
+    if(result.items.length||page===0)return {...result,page};
+    // 删除末页最后一条记录后回到仍有内容的一页。
+    page--;
+  }
+}
+function renderManagePager(prefix,result){
+  $('#'+prefix+'-pagination').hidden=result.items.length===0&&result.page===0;
+  $('#'+prefix+'-prev').disabled=result.page===0;
+  $('#'+prefix+'-next').disabled=!result.has_more;
+  $('#'+prefix+'-page').textContent=`第 ${result.page+1} 页 · 每页 ${managePageSize} 条`;
+}
+for(const prefix of ['documents','tasks']){
+  for(const [direction,step] of [['prev',-1],['next',1]]){
+    $('#'+prefix+'-'+direction).onclick=()=>{
+      if($('#'+prefix+'-'+direction).disabled)return;
+      if(prefix==='documents')documentPage=Math.max(0,documentPage+step);
+      else taskPage=Math.max(0,taskPage+step);
+      return loadManage().catch(error=>notice(error.message,{target:'#refresh-manage',tone:'error'}));
+    };
+  }
+}
 async function loadManage({preserveDocumentFocus=false}={}){
   const request=++manageRequest;
-  const [documents,tasks]=await Promise.all([api('/documents?limit=200'),api('/import-tasks?limit=50')]);
+  const [documents,tasks]=await Promise.all([fetchManagePage('/documents',documentPage),fetchManagePage('/import-tasks',taskPage)]);
   if(request!==manageRequest)return;
   const revision=JSON.stringify(documents.items.filter(doc=>doc.content_type==='catalog').map(doc=>[doc.id,doc.active_version]));
   if(catalogRevision!==null&&catalogRevision!==revision)await loadCourses();
   catalogRevision=revision;
   if(request!==manageRequest)return;
-  renderTasks(tasks);
+  taskPage=tasks.page;renderTasks(tasks);renderManagePager('tasks',tasks);
   await refreshUploadProgress(tasks);
   if(request!==manageRequest)return;
   // 保留正在操作的课程选择和文档按钮；任务刷新不受文档焦点影响。
   if(preserveDocumentFocus&&document.activeElement?.closest('#documents'))return;
+  documentPage=documents.page;renderManagePager('documents',documents);
   const targets=new Map(Array.from(document.querySelectorAll('.document-course-target'),select=>[select.dataset.documentId,select.value]));
   const feedbackDocument=noticeBox.closest('#documents>.item')?.dataset.documentId;
   const feedbackField=noticeField?.dataset.documentId;
@@ -700,7 +786,7 @@ async function loadManage({preserveDocumentFocus=false}={}){
     card.dataset.documentId=doc.id;
     const attribution=doc.content_type==='catalog'?'课程目录':state.courses.find(course=>course.course_id===doc.course_id)?.name||(doc.project_id?'项目 · '+doc.project_id:doc.course_id?'课程资料':'未指定归属');
     card.append(node('strong',doc.source_name),node('p',`${names[doc.status]||doc.status} · ${attribution}`,'muted'));
-    if(doc.source_path)card.append(node('p',doc.source_path,'muted'));for(const warning of doc.warnings||[])card.append(node('p',warning,'muted'));
+    if(doc.source_path)card.append(node('p',doc.source_path,'muted'));for(const warning of doc.warnings||[])card.append(node('p',importMessage(warning),'muted'));
     const link=node('a','下载原件');link.href=`/api/v1/documents/${doc.id}/source`;actions.append(link);
     if(doc.content_type==='catalog'&&(doc.catalog_review_available||tasks.items.some(task=>task.document_id===doc.id&&task.catalog_report)))actions.append(act('查看目录识别结果',async()=>showCatalogReview(doc.id)));
     if(doc.content_type==='catalog')actions.append(act('识别目录结构',async button=>{
@@ -769,7 +855,7 @@ function renderTasks(tasks){
       }
     }
     details.append(node('span',names[task.status]||task.status,'badge'),node('span',`${task.source_name||'原文档已不可用'} · ${kind} · ${progress}`));
-    if(task.error)details.append(node('p',task.error));
+    if(task.error)details.append(node('p',importMessage(task.error)));
     if(['failed','interrupted'].includes(task.status))actions.append(act('重试任务',async()=>{await api(`/import-tasks/${encodeURIComponent(task.id)}/retry`,{method:'POST'});await loadManage();}));
     const remove=act('删除任务',async()=>{
       if(!confirm('从最近的任务中删除这条记录？已导入的资料会保留。'))return;

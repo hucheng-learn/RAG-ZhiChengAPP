@@ -174,7 +174,7 @@
         available = supported && !!config?.available;
         maxSeconds = config?.max_seconds || 120;
         button.title = !supported ? '语音输入需要 HTTPS 或本机地址，以及支持录音的浏览器' :
-          !available ? '请先在服务端配置语音识别密钥' : '录音后转文字，核对后发送';
+          !available ? '请先在服务端配置共享 API Key 和语音模型' : '录音后转文字，核对后发送';
         status.textContent = !supported ? '当前浏览器或访问地址不支持录音' :
           !available ? '语音输入待配置' : '';
         render();

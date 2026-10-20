@@ -106,3 +106,76 @@ def test_timeout_and_upstream_error_are_actionable_and_do_not_leak():
         asyncio.run(
             MinerUClient(settings, transport=httpx.MockTransport(respond)).parse("a.pdf", b"pdf")
         )
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (
+            {
+                "err_msg": "number of pages exceeds limit (200 pages), "
+                "please split the file and try again"
+            },
+            "文件超过 200 页，请拆分后重新上传。",
+        ),
+        ({"err_msg": "File conversion failed"}, "文件转换失败，请另存为 PDF 后重新上传。"),
+        (
+            {"err_msg": "文件读取失败"},
+            "无法读取文件，请确认文件可正常打开，或重新另存后上传。",
+        ),
+        ({"err_msg": "file read timeout"}, "文件解析超时，请稍后重试。"),
+        (
+            {"err_msg": "MinerU test-secret https://storage.test/result?signature=private"},
+            "文件解析失败，请检查文件或稍后重试。",
+        ),
+        ({"err_msg": None}, "文件解析失败，请检查文件或稍后重试。"),
+    ],
+)
+def test_failed_task_translates_reason_without_exposing_upstream(failure, expected):
+    def respond(request):
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"batch_id": "batch", "file_urls": ["https://storage.test/upload"]},
+                },
+            )
+        if request.method == "PUT":
+            return httpx.Response(200)
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"extract_result": [{"state": "failed", **failure}]}},
+        )
+
+    settings = Settings(_env_file=None, mineru_api_token="test-secret")
+    with pytest.raises(BusinessError) as caught:
+        asyncio.run(
+            MinerUClient(settings, transport=httpx.MockTransport(respond)).parse("a.docx", b"docx")
+        )
+    assert caught.value.code == "mineru_failed"
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (-60006, "文件超过 200 页，请拆分后重新上传。"),
+        ("-60015", "文件转换失败，请另存为 PDF 后重新上传。"),
+        (-60003, "无法读取文件，请确认文件可正常打开，或重新另存后上传。"),
+        (-60008, "文件解析超时，请稍后重试。"),
+        ("A0211", "文件解析暂时不可用，请稍后重试。"),
+        (-60007, "文件解析暂时不可用，请稍后重试。"),
+        (-60018, "文件解析暂时不可用，请稍后重试。"),
+        (-99999, "文件解析暂时不可用，请稍后重试。"),
+    ],
+)
+def test_rejected_request_translates_error_code_without_exposing_message(code, expected):
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://api.test/file-urls/batch"),
+        json={"code": code, "msg": "MinerU test-secret https://storage.test/?signature=private"},
+    )
+    with pytest.raises(BusinessError) as caught:
+        MinerUClient._result(response)
+    assert str(caught.value) == expected

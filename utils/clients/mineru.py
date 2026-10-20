@@ -26,15 +26,45 @@ class MinerUClient:
     def require(self):
         if not self.available:
             raise BusinessError(
-                "mineru_unavailable", "此格式需要 MinerU，请配置 ZHICHENGAPP_MINERU_API_TOKEN", 503
+                "mineru_unavailable", "此格式的文件解析暂时不可用，请稍后重试。", 503
             )
 
     @staticmethod
     def _url(value):
         parsed = urlsplit(value)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username:
-            raise ValueError("MinerU 返回了无效下载地址")
+            raise ValueError("文件解析结果暂时不可用，请稍后重试。")
         return value
+
+    @staticmethod
+    def _error_message(code, message, fallback):
+        """只将已知错误转换成固定文案，绝不回传上游原文或签名地址。"""
+        code = str(code)
+        message = message.casefold() if isinstance(message, str) else ""
+        if code == "-60006" or any(
+            text in message
+            for text in ("number of pages exceeds limit", "page count exceeds", "文件页数超过")
+        ):
+            return "文件超过 200 页，请拆分后重新上传。"
+        if code in {"-60015", "-60016"} or any(
+            text in message for text in ("file conversion failed", "文件转换失败")
+        ):
+            return "文件转换失败，请另存为 PDF 后重新上传。"
+        if code in {"-60003", "-60004", "-60021"} or any(
+            text in message for text in ("file read failed", "文件读取失败", "空文件")
+        ):
+            return "无法读取文件，请确认文件可正常打开，或重新另存后上传。"
+        if code == "-60005":
+            return "文件超过 200 MB，请缩小文件后重新上传。"
+        if code == "-60002":
+            return "无法识别文件格式，请确认文件内容与扩展名一致后重新上传。"
+        if code == "-60008" or any(
+            text in message for text in ("file read timeout", "文件读取超时")
+        ):
+            return "文件解析超时，请稍后重试。"
+        if code in {"A0202", "A0211", "-10001", "-60007", "-60009", "-60018", "-60019"}:
+            return "文件解析暂时不可用，请稍后重试。"
+        return fallback
 
     @staticmethod
     def _result(response):
@@ -43,7 +73,10 @@ class MinerUClient:
         if body.get("code") != 0:
             # 上游错误可能含签名地址或文件正文，不原样展示。
             raise BusinessError(
-                "mineru_rejected", "MinerU 拒绝解析请求，请检查令牌、额度及文件格式"
+                "mineru_rejected",
+                MinerUClient._error_message(
+                    body.get("code"), body.get("msg"), "文件解析暂时不可用，请稍后重试。"
+                ),
             )
         return body["data"]
 
@@ -54,11 +87,11 @@ class MinerUClient:
                 if len(entries) > 10000 or sum(i.file_size for i in entries) > (
                     self.settings.max_docx_unpacked_bytes
                 ):
-                    raise ValueError("MinerU 解析结果解压后超过限制")
+                    raise ValueError("解析后的内容超过大小限制，请拆分文件后重新上传。")
                 paths = {relative_path(i.filename): i for i in entries if not i.is_dir()}
                 markdowns = [name for name in paths if name.lower().endswith(".md")]
                 if not markdowns:
-                    raise ValueError("MinerU 解析结果缺少 Markdown")
+                    raise ValueError("文件解析未生成正文，请检查文件或重新另存后上传。")
                 chosen = next(
                     (p for p in markdowns if PurePosixPath(p).name == "full.md"),
                     sorted(markdowns)[0],
@@ -71,10 +104,10 @@ class MinerUClient:
                     if path.suffix.lower() in IMAGE_EXTENSIONS and path.is_relative_to(parent):
                         assets[str(path.relative_to(parent))] = archive.read(entry)
                 if not source.strip():
-                    raise ValueError("MinerU 未识别出可索引正文")
+                    raise ValueError("未识别出有效正文，请检查文件内容后重新上传。")
                 return source, assets
         except (zipfile.BadZipFile, UnicodeDecodeError, KeyError) as exc:
-            raise ValueError("MinerU 返回了无效解析结果") from exc
+            raise ValueError("文件解析结果无效，请稍后重试。") from exc
 
     async def parse(self, filename, data, progress=None):
         self.require()
@@ -118,7 +151,12 @@ class MinerUClient:
                             continue
                         if result["state"] == "failed":
                             raise BusinessError(
-                                "mineru_failed", "MinerU 解析失败，请检查文件或稍后重试"
+                                "mineru_failed",
+                                self._error_message(
+                                    result.get("err_code", result.get("code")),
+                                    result.get("err_msg"),
+                                    "文件解析失败，请检查文件或稍后重试。",
+                                ),
                             )
                         if result["state"] == "done":
                             url = self._url(result["full_zip_url"])
@@ -137,13 +175,15 @@ class MinerUClient:
                                             len(archive) + len(block)
                                             > self.settings.max_docx_unpacked_bytes
                                         ):
-                                            raise ValueError("MinerU 下载结果超过大小限制")
+                                            raise ValueError(
+                                                "解析后的内容超过大小限制，请拆分文件后重新上传。"
+                                            )
                                         archive.extend(block)
                             return await asyncio.to_thread(self.unpack, archive)
                         await asyncio.sleep(self.settings.mineru_poll_seconds)
         except TimeoutError as exc:
-            raise BusinessError("mineru_timeout", "MinerU 解析等待超时，可从原件重试", 504) from exc
+            raise BusinessError("mineru_timeout", "文件解析超时，请稍后重试。", 504) from exc
         except (httpx.HTTPError, KeyError, IndexError) as exc:
             raise BusinessError(
-                "mineru_connection", "MinerU 服务请求失败，请检查网络和服务配置", 502
+                "mineru_connection", "文件解析暂时不可用，请稍后重试。", 502
             ) from exc

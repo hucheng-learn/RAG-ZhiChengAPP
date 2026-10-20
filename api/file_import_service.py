@@ -152,10 +152,12 @@ async def documents(
     rows = await rt.repo.find(
         "documents",
         {"status": {"$ne": "deleted"}},
-        limit=limit,
+        limit=limit + 1,
         offset=offset,
-        sort=[("created_at", -1)],
+        sort=[("created_at", -1), ("id", -1)],
     )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
     versions = {
         version["id"]: version
         for version in await rt.repo.find(
@@ -170,7 +172,7 @@ async def documents(
         row["catalog_review_available"] = bool(
             versions.get(row.get("latest_version"), {}).get("catalog_report")
         )
-    return {"items": rows}
+    return {"items": rows, "has_more": has_more}
 
 
 @router.get("/import-tasks")
@@ -178,8 +180,14 @@ async def tasks(
     limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), rt=Depends(runtime)
 ):
     rows = await rt.repo.find(
-        "tasks", {"deleted_at": None}, limit=limit, offset=offset, sort=[("created_at", -1)]
+        "tasks",
+        {"deleted_at": None},
+        limit=limit + 1,
+        offset=offset,
+        sort=[("created_at", -1), ("id", -1)],
     )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
     versions = {
         row["id"]: row
         for row in await rt.repo.find(
@@ -196,7 +204,7 @@ async def tasks(
         source = versions.get(row.get("version_id")) or documents.get(row.get("document_id"), {})
         row["source_name"] = source.get("source_name", "原文档已不可用")
         row["content_type"] = source.get("content_type")
-    return {"items": rows}
+    return {"items": rows, "has_more": has_more}
 
 
 @router.get("/import-tasks/{task_id}")

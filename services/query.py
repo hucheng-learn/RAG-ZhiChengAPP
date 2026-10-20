@@ -1,5 +1,7 @@
 import json
+import logging
 import re
+from time import perf_counter
 from uuid import uuid4
 
 from langchain_core.utils.json import parse_partial_json
@@ -311,7 +313,9 @@ class QueryService:
 
     async def retrieve(self, state):
         self.runtime.require_models()
+        started = perf_counter()
         dense, sparse = await self.runtime.models.encode([state["question"]])
+        encoded = perf_counter()
         selected = {}
         # 活动版本过滤后不足时扩大候选池，避免构建中/旧版本挤占全部位置。
         for limit in (
@@ -327,6 +331,7 @@ class QueryService:
                     limit=500,
                 )
             }
+            active_ids = []
             for hit in hits:
                 document = documents.get(hit["document_id"])
                 if (
@@ -334,13 +339,28 @@ class QueryService:
                     and document.get("status") == "ready"
                     and (document.get("active_version") == hit["version_id"])
                 ):
-                    row = await self.repo.get("chunks", hit["id"])
-                    if row:
-                        selected[row["id"]] = row
-            if len(selected) >= self.runtime.settings.rerank_limit:
+                    active_ids.append(hit["id"])
+            chunks = (
+                {
+                    row["id"]: row
+                    for row in await self.repo.find(
+                        "chunks", {"id": {"$in": active_ids}}, limit=limit
+                    )
+                }
+                if active_ids
+                else {}
+            )
+            for identifier in active_ids:
+                if identifier in chunks:
+                    selected[identifier] = chunks[identifier]
+            if len(selected) >= self.runtime.settings.rerank_limit or len(hits) < limit:
                 break
         rows = list(selected.values())[:30]
+        searched = perf_counter()
         if rows:
+            emit = state.get("run", {}).get("emit_status")
+            if emit:
+                await emit("已找到候选资料，正在筛选相关证据")
             scores = await self.runtime.models.rerank(
                 state["question"], [r["embedding_text"] for r in rows]
             )
@@ -349,6 +369,15 @@ class QueryService:
                 for score, row in sorted(zip(scores, rows, strict=True), key=lambda x: -x[0])
                 if score >= self.runtime.settings.min_relevance_score
             ]
+        logging.getLogger("zhichengapp").info(
+            "query_retrieval request_id=%s encode_seconds=%.3f search_seconds=%.3f "
+            "rerank_seconds=%.3f candidates=%d",
+            state.get("run", {}).get("request_id", "-"),
+            encoded - started,
+            searched - encoded,
+            perf_counter() - searched,
+            len(selected),
+        )
         return {"evidence": rows[: self.runtime.settings.rerank_limit]}
 
     @staticmethod
@@ -399,11 +428,32 @@ class QueryService:
         # 小段父章节补充背景，引用仍来自持久化原文，不拼入生成的解释。
         parents = []
         seen_parents = set()
+        sections = {
+            item["id"]: item
+            for item in await self.repo.find(
+                "sections",
+                {"id": {"$in": list({r.get("section_id") for r in rows})}},
+                limit=len(rows),
+            )
+        }
+        parent_ids = {
+            s["parent_section_id"] for s in sections.values() if s.get("parent_section_id")
+        }
+        parent_sections = (
+            {
+                item["id"]: item
+                for item in await self.repo.find(
+                    "sections", {"id": {"$in": list(parent_ids)}}, limit=len(parent_ids)
+                )
+            }
+            if parent_ids
+            else {}
+        )
         for row in rows:
-            section = await self.repo.get("sections", row.get("section_id"))
+            section = sections.get(row.get("section_id"))
             if not section or not section.get("parent_section_id"):
                 continue
-            parent = await self.repo.get("sections", section["parent_section_id"])
+            parent = parent_sections.get(section["parent_section_id"])
             if parent and parent["id"] not in seen_parents and parent["body"].strip():
                 if len(tokenizer.encode(parent["body"], add_special_tokens=True)) <= 512:
                     parents.append(
@@ -448,6 +498,7 @@ class QueryService:
             "citation_ids(integer array)。"
             "有依据的回答逐项使用 [1] 格式引用，citation_ids 必须与回答实际引用完全一致。"
             "代码表达式使用 Markdown 反引号或代码块包裹，引用放在代码之外。"
+            "需要图片时，使用证据中原有的 Markdown 图片路径，图片后标注对应引用，不编造路径。"
             "不允许编造引用或声称检索分数代表正确率。"
         )
         messages = [
@@ -501,8 +552,16 @@ class QueryService:
             ):
                 raise ValueError("unsupported response")
             # 生成期间资料可能被删除/更新；提交前再次校验，拒绝引用失效版本。
+            documents = {
+                item["id"]: item
+                for item in await self.repo.find(
+                    "documents",
+                    {"id": {"$in": list({c["document_id"] for c in citations})}},
+                    limit=len(citations),
+                )
+            }
             for item in citations:
-                document = await self.repo.get("documents", item["document_id"])
+                document = documents.get(item["document_id"])
                 if (
                     not document
                     or document.get("status") != "ready"

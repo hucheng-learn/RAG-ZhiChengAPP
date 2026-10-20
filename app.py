@@ -4,6 +4,7 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import perf_counter
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -39,7 +40,12 @@ def create_app(settings: Settings | None = None, *, runtime_factory=Runtime) -> 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         # 应用启动时：初始化日志、基础设施（数据库/消息队列等）与运行时服务
-        configure_logging(settings.log_level)
+        configure_logging(
+            settings.log_level,
+            settings.log_file,
+            max_bytes=settings.log_max_bytes,
+            backup_count=settings.log_backup_count,
+        )
         infrastructure = Infrastructure(settings)
         application.state.infrastructure = infrastructure
         runtime = None
@@ -52,11 +58,15 @@ def create_app(settings: Settings | None = None, *, runtime_factory=Runtime) -> 
             logger.info("application_started")
             # yield 之前为启动逻辑，之后为请求服务阶段
             yield
+        except Exception:
+            logger.exception("application_failed")
+            raise
         finally:
             # 应用关闭时按相反顺序释放资源
             if runtime:
                 await runtime.close()
             await infrastructure.close()
+            logger.info("application_stopped")
 
     application = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
@@ -72,12 +82,15 @@ def create_app(settings: Settings | None = None, *, runtime_factory=Runtime) -> 
         request.state.request_id = request_id
         # 绑定到 contextvars，使日志中能记录当前请求的 request_id
         token = request_id_context.set(request_id)
+        started = perf_counter()
         try:
             try:
                 response = await call_next(request)
             except Exception:
                 # 兜底异常处理：未捕获的异常统一转为 500 响应
-                logger.error("request_failed method=%s path=%s", request.method, request.url.path)
+                logger.exception(
+                    "request_failed method=%s path=%s", request.method, request.url.path
+                )
                 response = JSONResponse(
                     status_code=500,
                     content={
@@ -88,6 +101,13 @@ def create_app(settings: Settings | None = None, *, runtime_factory=Runtime) -> 
                 )
             # 将 request_id 写回响应头，便于前后端问题排查
             response.headers["X-Request-ID"] = request_id
+            # 流式响应此处记录响应头就绪时间，流内错误由生成器单独记录。
+            log = logger.warning if response.status_code >= 400 else logger.info
+            log(
+                "request_completed method=%s path=%s status=%s duration_ms=%.2f",
+                request.method, request.url.path, response.status_code,
+                (perf_counter() - started) * 1000,
+            )
             return response
         finally:
             # 还原上下文，避免协程间串号

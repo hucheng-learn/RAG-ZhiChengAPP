@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -9,6 +10,7 @@ from common.errors import BusinessError
 from schemas.api import QueryRequest
 
 router = APIRouter(prefix="/api/v1/query", tags=["query"])
+logger = logging.getLogger("zhichengapp")
 
 
 @router.post("")
@@ -42,6 +44,12 @@ async def stream(body: QueryRequest, request: Request, rt=Depends(runtime)):
         terminal = False
         deltas = asyncio.Queue(maxsize=32)
         run["emit"] = deltas.put
+
+        async def emit_status(message):
+            run["stage_message"] = message
+            await deltas.put({"message": message})
+
+        run["emit_status"] = emit_status
         try:
             yield event(
                 "meta", request_id, session_id=body.session_id, message_id=run["message_id"]
@@ -54,13 +62,21 @@ async def stream(body: QueryRequest, request: Request, rt=Depends(runtime)):
                     {operation, pending}, timeout=10, return_when=asyncio.FIRST_COMPLETED
                 )
                 if pending in done:
-                    yield event("token", request_id, text=pending.result(), provisional=True)
+                    value = pending.result()
+                    if isinstance(value, dict):
+                        yield event("status", request_id, **value)
+                    else:
+                        yield event("token", request_id, text=value, provisional=True)
                 else:
                     pending.cancel()
                     await asyncio.gather(pending, return_exceptions=True)
                 pending = None
                 if not done:
-                    yield event("status", request_id, message="仍在处理，请稍候")
+                    yield event(
+                        "status",
+                        request_id,
+                        message=run.get("stage_message", "正在检索并核对课程证据") + "，请稍候",
+                    )
             result = await operation
             yield event("citations", request_id, citations=result["citations"])
             await rt.query.finish(run, result)
@@ -69,6 +85,10 @@ async def stream(body: QueryRequest, request: Request, rt=Depends(runtime)):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if isinstance(exc, BusinessError):
+                logger.warning("query_stream_failed request_id=%s code=%s", request_id, exc.code)
+            else:
+                logger.exception("query_stream_failed request_id=%s", request_id)
             await rt.query.finish(run, status="failed")
             terminal = True
             yield event(

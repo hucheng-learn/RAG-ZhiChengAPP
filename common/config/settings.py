@@ -12,6 +12,9 @@ class Settings(BaseSettings):
 
     app_name: str = "知成 ZhiChengApp"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    log_file: Path = Path(__file__).resolve().parents[2] / "logs" / "zhichengapp.log"
+    log_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
+    log_backup_count: int = Field(default=5, ge=1)
     dependency_timeout_seconds: float = Field(default=3, ge=0.1, le=30)
     mongo_uri: SecretStr = SecretStr("")
     mongo_database: Literal["zhichengapp"] = "zhichengapp"
@@ -29,8 +32,8 @@ class Settings(BaseSettings):
     asr_url: str = (
         "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
     )
-    asr_api_key: SecretStr = SecretStr("")
-    asr_model: str = "qwen-audio-3.1-asr-flash"
+    # 语音识别复用 llm_api_key；模型名称由 .env 显式配置。
+    asr_model: str = ""
     asr_timeout_seconds: float = Field(default=60, ge=1, le=180)
     embedding_model_path: Path | None = None
     reranker_model_path: Path | None = None

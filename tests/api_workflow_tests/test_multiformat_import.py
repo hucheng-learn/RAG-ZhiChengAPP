@@ -38,13 +38,17 @@ def test_default_limits_and_missing_mineru(system):
     assert response.status_code == 503 and response.json()["code"] == "mineru_unavailable"
 
 
-def test_folder_associates_reference_images_preserves_paths_and_deletes_assets(system):
+@pytest.mark.parametrize("reference", [
+    "![figure](../images/a.png)",
+    '<img src="../images/a.png" style="zoom: 67%;" />',
+])
+def test_folder_associates_reference_images_preserves_paths_and_deletes_assets(system, reference):
     client, runtime = system
     course(client)
     response = send(
         client,
         [
-            ("root/lessons/a.md", b"# Lesson\n![figure](../images/a.png)"),
+            ("root/lessons/a.md", f"# Lesson\n{reference}".encode()),
             ("root/images/a.png", PNG),
             ("root/notes.bin", b"skip"),
         ],
@@ -186,7 +190,8 @@ def test_durable_queue_accepts_more_than_in_memory_slots(system):
         assert wait_task(client, task["task_id"])["status"] == "completed"
 
 
-def test_mineru_markdown_image_ocr_remains_in_original_section(system):
+@pytest.mark.parametrize("reference", ["![图](a.png)", '<img src="a.png" />'])
+def test_mineru_markdown_image_ocr_remains_in_original_section(system, reference):
     from pydantic import SecretStr
 
     client, runtime = system
@@ -194,7 +199,8 @@ def test_mineru_markdown_image_ocr_remains_in_original_section(system):
     runtime.settings.mineru_api_token = SecretStr("mock")
     runtime.mineru.parse = AsyncMock(return_value=("图片里有文字", {}))
     task = send(
-        client, [("a.md", "# 第一节\n![图](a.png)\n# 第二节\n普通文字".encode()), ("a.png", PNG)]
+        client,
+        [("a.md", f"# 第一节\n{reference}\n\n# 第二节\n普通文字".encode()), ("a.png", PNG)],
     ).json()["items"][0]["task"]
     assert wait_task(client, task["task_id"])["status"] == "completed"
     sections = asyncio.run(runtime.repo.find("sections", {"document_id": task["document_id"]}))

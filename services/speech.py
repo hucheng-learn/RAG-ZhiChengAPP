@@ -20,7 +20,11 @@ class SpeechRecognition:
 
     @property
     def available(self):
-        return bool(self.settings.asr_api_key.get_secret_value() and self.settings.asr_url)
+        return bool(
+            self.settings.llm_api_key.get_secret_value()
+            and self.settings.asr_url.strip()
+            and self.settings.asr_model.strip()
+        )
 
     def capabilities(self):
         return {"available": self.available, "max_seconds": MAX_SECONDS,
@@ -28,7 +32,9 @@ class SpeechRecognition:
 
     async def transcribe(self, audio: bytes) -> str:
         if not self.available:
-            raise BusinessError("asr_unconfigured", "语音识别尚未配置，请先配置语音服务密钥", 503)
+            raise BusinessError(
+                "asr_unconfigured", "语音识别尚未配置，请检查共享 API Key 和语音模型配置", 503
+            )
         if len(audio) > MAX_AUDIO_BYTES:
             raise BusinessError("audio_too_large", "录音过大，请控制在 2 分钟以内", 413)
         try:
@@ -61,7 +67,7 @@ class SpeechRecognition:
                 response = await client.post(
                     self.settings.asr_url,
                     headers={
-                        "Authorization": "Bearer " + self.settings.asr_api_key.get_secret_value(),
+                        "Authorization": "Bearer " + self.settings.llm_api_key.get_secret_value(),
                         "X-DashScope-SSE": "disable",
                     },
                     json=payload,

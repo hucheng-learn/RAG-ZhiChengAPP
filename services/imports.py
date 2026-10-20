@@ -699,7 +699,7 @@ class ImportService:
             )
             assets.update(await self.repo.call(docx_images, data))
             if assets:
-                parsed.warnings.append("Word 图片已保留；配置 MinerU 后可识别图片中的文字")
+                parsed.warnings.append("Word 图片已保留，当前未识别图片中的文字")
         else:
             source = data.decode("utf-8-sig")
             parsed = await self.repo.call(
@@ -723,7 +723,7 @@ class ImportService:
                 source = append_image_text(source, recognized_images)
                 parsed = parse_markdown(source, document_id=document_id, version_id=version["id"])
         if assets and not self.runtime.mineru.available and suffix in {".md", ".markdown", ".txt"}:
-            parsed.warnings.append("关联图片已保存；配置 MinerU 后可识别图片中的文字")
+            parsed.warnings.append("关联图片已保存，当前未识别图片中的文字")
         if converted:
             for section in parsed.sections:
                 section.source.format = "normalized"

@@ -27,7 +27,10 @@ def wav(frames=1600, rate=SAMPLE_RATE, channels=1):
 
 @pytest.fixture
 def application():
-    settings = Settings(_env_file=None, asr_api_key="private-asr-key")
+    settings = Settings(
+        _env_file=None, llm_api_key="private-asr-key",
+        llm_model="chat-test-model", asr_model="configured-asr-model"
+    )
     return create_app(settings)
 
 
@@ -44,7 +47,7 @@ def test_transcribe_uses_documented_payload_and_preserves_credentials(applicatio
 
     def provider(request):
         body = json.loads(request.content)
-        assert body["model"] == "qwen-audio-3.1-asr-flash"
+        assert body["model"] == "configured-asr-model"
         assert body["parameters"] == {"format": "wav", "sample_rate": "16000"}
         content = body["input"]["messages"][0]["content"][0]
         assert content["type"] == "input_audio"
@@ -113,7 +116,9 @@ def test_capabilities_and_unconfigured_service(application):
     response = client.get("/api/v1/capabilities")
     assert response.json()["speech"]["available"] is True
     assert "private-asr-key" not in response.text
-    application.state.speech = SpeechRecognition(Settings(_env_file=None, asr_api_key=""))
+    application.state.speech = SpeechRecognition(
+        Settings(_env_file=None, llm_api_key="", asr_model="configured-asr-model")
+    )
     assert client.get("/api/v1/capabilities").json()["speech"]["available"] is False
     response = client.post("/api/v1/speech/transcribe", files={"audio": ("x.wav", wav())})
     assert response.status_code == 503
@@ -128,3 +133,26 @@ def test_maximum_duration_is_accepted(application):
         "audio": ("recording.wav", wav(SAMPLE_RATE * 120))
     })
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("model", ["", "   "])
+def test_missing_asr_model_does_not_fall_back_to_chat_model(model):
+    settings = Settings(
+        _env_file=None, llm_api_key="shared-key", llm_model="chat-model", asr_model=model
+    )
+    assert not SpeechRecognition(settings).available
+
+
+def test_asr_model_is_loaded_from_env_file(tmp_path, monkeypatch):
+    for name in ("ZHICHENGAPP_ASR_MODEL", "ZHICHENGAPP_LLM_MODEL", "ZHICHENGAPP_LLM_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "ZHICHENGAPP_LLM_MODEL='qwen3.8-flash'\n"
+        "ZHICHENGAPP_LLM_API_KEY='shared-key'\n"
+        "ZHICHENGAPP_ASR_MODEL='custom-asr-model'\n", encoding="utf-8"
+    )
+    settings = Settings(_env_file=env_file)
+    assert settings.asr_model == "custom-asr-model"
+    assert settings.llm_model == "qwen3.8-flash"
+    assert SpeechRecognition(settings).available

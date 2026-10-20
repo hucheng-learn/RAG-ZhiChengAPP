@@ -11,15 +11,14 @@ async def questions(
     code: str | None = None,
     question_type: str | None = None,
     knowledge_point: str | None = None,
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(10, ge=1, le=200),
     offset: int = Query(0, ge=0),
     rt=Depends(runtime),
 ):
-    return {
-        "items": await rt.catalog.questions(
-            course_id, code, question_type, knowledge_point, limit, offset
-        )
-    }
+    rows = await rt.catalog.questions(
+        course_id, code, question_type, knowledge_point, limit + 1, offset
+    )
+    return {"items": rows[:limit], "has_more": len(rows) > limit}
 
 
 @router.get("/{question_id}/solution")
