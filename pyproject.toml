@@ -30,6 +30,7 @@ dependencies = [
     "langchain-core>=1,<2",
     "openai>=2,<4",  # 目录识别需要捕获 SDK 的连接和超时异常。
     "httpx>=0.28,<1",
+    "omml2latex==0.1.1",
 ]
 
 # 可选本地向量/重排模型：uv sync --extra local-models。

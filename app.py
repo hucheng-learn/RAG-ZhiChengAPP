@@ -46,6 +46,7 @@ def create_app(settings: Settings | None = None, *, runtime_factory=Runtime) -> 
             max_bytes=settings.log_max_bytes,
             backup_count=settings.log_backup_count,
         )
+        # 生命周期内管理客户端。健康检查只读，不自动创建数据库、桶或集合。
         infrastructure = Infrastructure(settings)
         application.state.infrastructure = infrastructure
         runtime = None
@@ -54,6 +55,7 @@ def create_app(settings: Settings | None = None, *, runtime_factory=Runtime) -> 
             # 通过工厂创建运行时，便于测试时替换为 mock 实现
             runtime = runtime_factory(settings, infrastructure)
             application.state.runtime = runtime
+            # 包含创建消费者，services.imports.ImportService.start
             await runtime.start()
             logger.info("application_started")
             # yield 之前为启动逻辑，之后为请求服务阶段
@@ -161,15 +163,15 @@ def create_app(settings: Settings | None = None, *, runtime_factory=Runtime) -> 
     # 静态资源（前端页面）挂载到 /assets
     application.mount("/assets", StaticFiles(directory=ROOT / "page"), name="assets")
 
-    @application.get("/api/v1/capabilities", tags=["health"])
+    @application.get("/api/v1/capabilities", tags=["health"], summary="查询服务能力")
     async def capabilities(request: Request):
-        # 汇总运行时与语音识别服务的能力信息，供客户端探测
+        """汇总运行时与语音识别服务的能力信息，供客户端探测。"""
         return {**request.app.state.runtime.capabilities(),
                 "speech": request.app.state.speech.capabilities()}
 
     @application.get("/", include_in_schema=False)
     async def index():
-        # 首页：返回前端页面（不展示在 OpenAPI 文档中）
+        # 首页：返回前端页面
         return FileResponse(ROOT / "page" / "index.html")
 
     return application

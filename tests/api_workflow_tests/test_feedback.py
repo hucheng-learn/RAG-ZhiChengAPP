@@ -47,8 +47,15 @@ def test_sse_emits_model_draft_before_completion_and_replaces_invalid_citations(
         try:
             assert "event: meta" in await anext(generator)
             assert "event: status" in await anext(generator)
-            token = await asyncio.wait_for(anext(generator), 3)
-            assert "event: token" in token and "实时草稿" in token
+            # 各查询阶段都会推送状态事件，数量随流程调整；跳过状态直至首个模型 token
+            token = None
+            while token is None:
+                item = await asyncio.wait_for(anext(generator), 3)
+                if "event: token" in item:
+                    token = item
+                else:
+                    assert "event: status" in item
+            assert "实时草稿" in token
             assert not released.is_set()
             released.set()
             remaining = [item async for item in generator]

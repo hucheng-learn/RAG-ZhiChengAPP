@@ -95,20 +95,24 @@ const names = {queued:'排队中',processing:'处理中',completed:'已完成',f
 // 所有资料内容通过 textContent 渲染；文档或模型输出不能变成 HTML 或脚本。
 function node(tag,text,cls){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(cls)el.className=cls;return el;}
 const noticeBox=$('#notice');
-let noticeTimer,noticeField;
+let noticeTimer,noticeField,noticeFieldClear;
 function markNoticeField(field){
   noticeField=field;field.setAttribute('aria-invalid','true');
   field.setAttribute('aria-describedby',[field.getAttribute('aria-describedby'),'notice'].filter(Boolean).join(' '));
-  field.addEventListener('change',()=>{if(noticeField===field)notice('');},{once:true});
+  noticeFieldClear=()=>notice('');
+  field.addEventListener('input',noticeFieldClear);
+  field.addEventListener('change',noticeFieldClear);
 }
-// 操作反馈跟随对应的表单或按钮；待补充项和错误保留到用户处理。
+// 操作反馈短暂显示；重新编辑时立即清除提示和字段标记。
 function notice(text,{target,tone='info',field}={}){
   clearTimeout(noticeTimer);
   if(noticeField){
+    noticeField.removeEventListener('input',noticeFieldClear);
+    noticeField.removeEventListener('change',noticeFieldClear);
     noticeField.removeAttribute('aria-invalid');
     const describedBy=(noticeField.getAttribute('aria-describedby')||'').split(' ').filter(id=>id&&id!=='notice');
     if(describedBy.length)noticeField.setAttribute('aria-describedby',describedBy.join(' '));else noticeField.removeAttribute('aria-describedby');
-    noticeField=null;
+    noticeField=null;noticeFieldClear=null;
   }
   noticeBox.replaceChildren();noticeBox.hidden=!text;
   if(!text)return;
@@ -126,7 +130,7 @@ function notice(text,{target,tone='info',field}={}){
     markNoticeField(field);field.focus();
   }
   noticeBox.scrollIntoView({block:'nearest',inline:'nearest'});
-  if(tone==='info'||tone==='success')noticeTimer=setTimeout(()=>notice(''),8000);
+  noticeTimer=setTimeout(()=>notice(''),5000);
 }
 async function api(path,options={}){const response=await fetch('/api/v1'+path,options);if(response.status===204)return null;const data=await response.json();if(!response.ok)throw new Error(data.message||'请求失败');return data;}
 const json=(method,body)=>({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -481,6 +485,7 @@ function uploadSelectionError(files,limits){
 }
 function selectedUploadFiles(){return Array.from($('#folder').files.length?$('#folder').files:$('#file').files);}
 for(const selector of ['#file','#folder'])$(selector).addEventListener('change',()=>{
+  if(noticeField===$('#file')||noticeField===$('#folder'))notice('');
   $(selector==='#file'?'#folder':'#file').value='';
   const files=selectedUploadFiles();
   $('#upload-selection').textContent=files.length?`已选择 ${files.length} 个文件 · ${(files.reduce((sum,file)=>sum+file.size,0)/(1024*1024)).toFixed(1)} MB`:'';

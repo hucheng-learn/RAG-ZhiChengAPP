@@ -1,4 +1,5 @@
-# 知成 ZhiChengApp
+# 知成
+ZhiChengApp
 
 ## 项目概述
 
@@ -12,6 +13,7 @@
 - **课程目录识别**：导入 Markdown、Word、PDF 等课程目录，自动识别系列与课程，支持核对后启用。
 - **资料问答**：按课程查找相关内容，逐步显示回答，并提供原文引用和原件下载。
 - **题库练习**：导入模板题库或自动识别 Word / PDF 等题库，练习时按需查看标准答案与解析。
+- **聊天语音输入**：聊天输入框录音转文字，与聊天共用 API 密钥，音频仅在内存中转发识别。
 - **历史会话**：保存、继续和删除对话。
 
 ## 操作流程
@@ -23,6 +25,17 @@
 5. 需要练习时进入题库，选择题目作答，再查看标准答案与解析。
 
 批量导入课程目录或题库时，在上传区域展开“资料设置”，选择对应类型。目录识别后可在“课程目录识别结果”中核对并启用；题库支持 [示例格式](tests/sample_data/python_questions.md) 快速解析；其他排版调用大模型提取原文中的题干和答案，缺少答案或无法核对的字段会报错，识别结果仍标为未审核。
+
+上传类型（`content_type`）共四种：
+
+| 取值 | 含义 |
+| --- | --- |
+| `lecture` | 讲义 / 课程正文 |
+| `project` | 实战项目 |
+| `catalog` | 课程目录（系列 + 课程的清单） |
+| `question_bank` | 题库 |
+
+其中 `catalog` 为目录类型，走大模型识别系列与课程的专用分支，并强制归属到课程或项目；其余三种按普通资料处理。
 
 ## 聊天语音输入
 
@@ -117,7 +130,7 @@ Get-Content .\logs\zhichengapp.log -Tail 50 -Wait
 
 - Markdown / TXT 直接本地读取。未配置 MinerU 时，DOCX 使用本地解析并保留内嵌图片；图片文字不参与检索，页面会显示警告。
 - 配置 `ZHICHENGAPP_MINERU_API_TOKEN` 后，DOCX、PDF、DOC、PPT/PPTX 和 PNG/JPG/JPEG/JP2/WEBP/GIF/BMP 使用 MinerU v4；Markdown 关联图片也进行 OCR。默认地址 `https://mineru.net/api/v4`，模型 `vlm`。
-- 可复用旧项目 `.env` 的 `MINERU_API_TOKEN`、`MINERU_BASE_URL`，在新项目中分别填写 `ZHICHENGAPP_MINERU_API_TOKEN`、`ZHICHENGAPP_MINERU_BASE_URL`。配置后需重启应用。原件和解析图片会发送给所配置的 MinerU 服务；仅接入接口，无需在应用环境安装 MinerU 模型。
+- 在`.env`中分别填写`MINERU_API_TOKEN`、`MINERU_BASE_URL`、`ZHICHENGAPP_MINERU_API_TOKEN`、`ZHICHENGAPP_MINERU_BASE_URL`。配置后需重启应用。原件和解析图片会发送给所配置的 MinerU 服务；仅接入接口，无需在应用环境安装 MinerU 模型。
 - MinerU 官方接口另有页数和额度限制，200 MB 文件也可能因超过页数或额度而解析失败。解析超时默认 30 分钟，可从已有原件重试；上传超时 10 分钟。
 - 单文件、单批总量和解压结果默认均为 200 MiB（209715200 字节），可通过 `MAX_UPLOAD_BYTES`、`MAX_BATCH_BYTES`、`MAX_DOCX_UNPACKED_BYTES` 配置（均加 `ZHICHENGAPP_` 前缀）。文档含大量图片时，压缩文件未超限仍可能触发解压限制。
 - 文件夹保留来源相对路径；同名不同目录分别入库。Markdown 图片链接按相对路径匹配，引用式图片也可关联；外部图片不自动抓取，未上传的图片会产生警告。被引用图片作为附件，不额外创建独立资料；不支持的文件单独显示跳过。
@@ -126,4 +139,4 @@ Get-Content .\logs\zhichengapp.log -Tail 50 -Wait
 
 参考：[MinerU v4 官方接口文档](https://mineru.net/doc/docs/index_en/)。
 
-MinerU API 请求沿用系统代理，结果 CDN 默认直连（沿用旧项目做法）；如网络要求代理下载，可设置 `ZHICHENGAPP_MINERU_DOWNLOAD_TRUST_ENV=true`。
+MinerU API 请求沿用系统代理，结果 CDN 默认直连；如网络要求代理下载，可设置 `ZHICHENGAPP_MINERU_DOWNLOAD_TRUST_ENV=true`。

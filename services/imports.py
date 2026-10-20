@@ -13,7 +13,7 @@ from schemas.api import Attribution
 from schemas.document import Section, SourceLocation
 from utils.chunking.token_budget import TokenBudgetChunker
 from utils.parsers.catalog import CATALOG_BATCH_MAX_LINES, recognize_catalog
-from utils.parsers.docx import docx_images, parse_docx
+from utils.parsers.docx import DOCX_PARSER_VERSION, docx_images, parse_docx
 from utils.parsers.education import parse_questions
 from utils.parsers.files import (
     REMOTE_EXTENSIONS,
@@ -97,7 +97,7 @@ class ImportService:
             except UnicodeDecodeError as exc:
                 raise BusinessError("invalid_encoding", "Markdown 请使用 UTF-8 编码") from exc
 
-    def fingerprint(self, content_type=None):
+    def fingerprint(self, content_type=None, *, source_name=None):
         s = self.settings
         configuration = {
             "parser": "education-unified-v3",
@@ -109,6 +109,12 @@ class ImportService:
             "overlap": s.chunk_overlap_tokens,
             "embedding": str(s.embedding_model_path),
         }
+        if (
+            source_name
+            and PurePath(source_name).suffix.lower() == ".docx"
+            and not self.runtime.mineru.available
+        ):
+            configuration["docx_parser"] = DOCX_PARSER_VERSION
         if content_type == "catalog":
             configuration.update(
                 parser="llm-catalog-v1",
@@ -134,7 +140,12 @@ class ImportService:
         首次上传以内容哈希区分同名文件。只有显式 document_id 的版本接口会更新文档。
         """
         filename = filename.replace("\\", "/").rsplit("/", 1)[-1][:200]
+        # 校验：
+        # 后缀白名单校验；特殊文件必须 MinerU 先就绪；
+        # docx额外做zip解压后体积检查（防止解压炸弹）并且校验`word/document.xml`存在；
+        # Markdown必须utf-8可解码，目录类型是特例需要LLM,且强制`course_id/project_id`置空
         self._validate(filename, data, content_type)
+
         if content_type == "catalog" and self.runtime.llm.client is None:
             raise BusinessError("llm_unavailable", "课程目录识别需要先配置大模型连接", 503)
         if content_type == "catalog":
@@ -149,6 +160,8 @@ class ImportService:
         for value in assets.values():
             if not value or len(value) > self.settings.max_upload_bytes:
                 raise BusinessError("invalid_asset_size", "关联图片为空或超过单文件限制", 413)
+
+        # 指纹与幂等
         digest = hashlib.sha256(data).hexdigest()
         asset_digest = [
             (name, hashlib.sha256(value).hexdigest()) for name, value in sorted(assets.items())
@@ -161,7 +174,7 @@ class ImportService:
                     content_type,
                     course_id,
                     project_id,
-                    self.fingerprint(content_type),
+                    self.fingerprint(content_type, source_name=filename),
                     source_path,
                     asset_digest,
                 ]
@@ -204,6 +217,8 @@ class ImportService:
                     "status": "building" if confirmed else "needs_review",
                     "created_at": now(),
                 }
+
+            # 并发保护
             async with self.lock(document_id):
                 if is_update:
                     document = await self.require_document(document_id)
@@ -235,6 +250,8 @@ class ImportService:
                 source_key = (
                     f"documents/{document_id}/{version_id}/source{PurePath(filename).suffix}"
                 )
+                # 落库与排队 ：原件写对象存储（`blobs.put` ），
+                # 再写`versions` /`documents` /`tasks` 三条记录
                 await self.blobs.put(source_key, data)
                 asset_records = await self._save_assets(document_id, version_id, assets, "original")
                 version = {
@@ -245,7 +262,7 @@ class ImportService:
                     "content_hash": digest,
                     "source_path": source_path,
                     "original_assets": asset_records,
-                    "fingerprint": self.fingerprint(content_type),
+                    "fingerprint": self.fingerprint(content_type, source_name=filename),
                     "content_type": content_type,
                     "course_id": course_id,
                     "project_id": project_id,
@@ -648,6 +665,11 @@ class ImportService:
             for item in version.get("original_assets", [])
         }
 
+    # 导入流程第一个节点
+    # 先删旧 chunks/sections/向量/附件，保证重跑幂等
+    # 再取原件按后缀分流——pdf/ppt/图片交给 MinerU，docx 在有 MinerU 时走 MinerU、否则本地`parse_docx` ，md/txt 直接解码
+    # 之后按`content_type` 分岔：`catalog` 走目录识别、`question_bank` 先本地解析（失败回落 LLM 识别）、普通文档切 section 成 chunks
+    # 空文档会直接失败
     async def parse_and_store(self, state):
         """解析及持久化正文，State 只携带 ID 和计数，不携带整批向量。"""
         version = await self.repo.get("versions", state["version_id"])
@@ -656,6 +678,8 @@ class ImportService:
             await self.repo.patch("versions", version["id"], {"catalog_report": None})
             await self.repo.patch("tasks", state["task_id"], {"catalog_report": None})
         await self.repo.patch("tasks", state["task_id"], {"stage": "parsing", "progress": 10})
+
+        # 先删旧 chunks/sections/向量/附件，保证重跑幂等
         for collection in ("chunks", "sections", "courses", "series", "questions"):
             await self.repo.delete(
                 collection, {"document_id": document_id, "version_id": version["id"]}
@@ -665,6 +689,8 @@ class ImportService:
             await self.blobs.remove(item["key"])
         await self.repo.patch("versions", version["id"], {"assets": []})
         data = await self.blobs.get(version["source_key"])
+
+        # 再取原件按后缀分流——pdf/ppt/图片交给 MinerU，docx 在有 MinerU 时走 MinerU、否则本地`parse_docx` ，md/txt 直接解码
         suffix = PurePath(version["source_name"]).suffix.lower()
         assets = await self._original_assets(version)
         converted = False
@@ -736,9 +762,14 @@ class ImportService:
             version["id"],
             {
                 "normalized_key": normalized_key,
+                "document_parser_version": parsed.parser_version,
                 "warnings": parsed.warnings,
             },
         )
+
+        # 之后按`content_type` 分岔：`catalog` 走目录识别、
+        # `question_bank` 先本地解析（失败回落 LLM 识别）、普通文档切 section 成 chunks
+        # 空文档会直接失败
         if version["content_type"] == "catalog":
 
             async def progress(index, total):
@@ -860,10 +891,14 @@ class ImportService:
                 for chunk in await self.repo.call(chunker.split, section, metadata):
                     await self.repo.put("chunks", chunk)
                     chunks += 1
+        
+        # 空文档会直接失败
         if not chunks:
             raise ValueError("未提取到可索引正文")
         return {"chunk_count": chunks, "record_count": len(parsed.sections)}
 
+    # 导入流程第二个节点
+    # 分批算 dense/sparse 向量 upsert 进 Milvus
     async def index(self, state):
         await self.repo.patch("tasks", state["task_id"], {"stage": "embedding", "progress": 35})
         if not state["chunk_count"]:
@@ -914,14 +949,17 @@ class ImportService:
             )
         return {}
 
+    # 导入流程第三个节点
     async def activate(self, state):
         """强一致性数量校验通过后原子切换；删除标记优先于正在完成的导入。"""
         if state.get("catalog_needs_review"):
             return {}
         version = await self.repo.get("versions", state["version_id"])
         if state["chunk_count"]:
+            # `verify` 管 数量一致性 （向量库侧）
             await self.vectors.verify(version["document_id"], version["id"], state["chunk_count"])
         await self.repo.patch("versions", version["id"], {"status": "ready", **state})
+        # 原子`patch` 管 指针与状态的一致写入 （MongoDB 侧）
         updated = await self.repo.patch(
             "documents",
             version["document_id"],

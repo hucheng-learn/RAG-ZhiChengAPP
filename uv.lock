@@ -770,6 +770,15 @@ wheels = [
 ]
 
 [[package]]
+name = "omml2latex"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4c/9c/4c6f8ec7ffdf3ee5dbb0d0d4d68233cbcd137f800e40e69d6e2e0da87692/omml2latex-0.1.1.tar.gz", hash = "sha256:eda9ff25c881f753357c325ab7a63ba33ad807f0ec8293fff39c8b370ff9084a", size = 35514, upload-time = "2026-04-09T17:31:58.903Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/66/528fd921508c4a84c4d7f2cc6bf1ae45c96a387081d90e3a60d3e4a1a245/omml2latex-0.1.1-py3-none-any.whl", hash = "sha256:b24a13f4a14791662972d1b6716e5a1f9114891ccf1a96622f61dbfb1c300bd4", size = 32473, upload-time = "2026-04-09T17:31:57.162Z" },
+]
+
+[[package]]
 name = "openai"
 version = "3.35.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1476,6 +1485,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "markdown-it-py" },
     { name = "minio" },
+    { name = "omml2latex" },
     { name = "openai" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -1513,6 +1523,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.0,<2" },
     { name = "markdown-it-py", specifier = ">=3,<5" },
     { name = "minio", specifier = ">=7.2,<8" },
+    { name = "omml2latex", specifier = "==0.1.1" },
     { name = "openai", specifier = ">=2,<4" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "pydantic-settings", specifier = ">=2.7,<3" },

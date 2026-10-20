@@ -6,6 +6,9 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from schemas.document import ParsedDocument, Section, SourceLocation
+from utils.parsers.docx_math import paragraph_text
+
+DOCX_PARSER_VERSION = "docx-v3-omml"
 
 
 def parse_docx(
@@ -75,14 +78,20 @@ def parse_docx(
             if heading_level is not None:
                 if body or heading_start is not None:
                     flush(number)
-                title, level = block.text, heading_level
+                title, level = paragraph_text(block), heading_level
                 body_start, heading_start = number + 1, number
             else:
-                body.append(block.text)
+                body.append(paragraph_text(block))
         elif isinstance(block, Table):
             # 保留原顺序，表格转换为标准化文本；块编号指向原 DOCX 表格。
             body.append(
-                "\n".join(" | ".join(cell.text for cell in row.cells) for row in block.rows)
+                "\n".join(
+                    " | ".join(
+                        "\n".join(paragraph_text(p) for p in cell.paragraphs)
+                        for cell in row.cells
+                    )
+                    for row in block.rows
+                )
             )
         if include_images:
             element = block._p if isinstance(block, Paragraph) else block._tbl
@@ -97,7 +106,7 @@ def parse_docx(
         warnings.append("已按显式配置映射自定义标题样式，请核对层级")
     if not include_images and document.part.element.xpath(".//w:drawing | .//w:pict"):
         warnings.append("文档包含图片，本阶段未识别图片内容")
-    return ParsedDocument(parser_version="docx-v2", sections=sections, warnings=warnings)
+    return ParsedDocument(parser_version=DOCX_PARSER_VERSION, sections=sections, warnings=warnings)
 
 
 def docx_images(source):

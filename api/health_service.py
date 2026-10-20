@@ -4,12 +4,13 @@ from fastapi.responses import JSONResponse
 router = APIRouter(tags=["health"])
 
 
-@router.get("/health/live")
+@router.get("/health/live", summary="存活探针")
 async def live():
+    """进程存活检查，不探测任何依赖，始终返回 200。"""
     return {"status": "alive"}
 
 
-@router.get("/health/ready")
+@router.get("/health/ready", summary="就绪探针")
 async def ready(request: Request):
     """同时报告基础设施与业务能力；连接成功不等于模型和工作流已就绪。"""
     result = await request.app.state.infrastructure.readiness()

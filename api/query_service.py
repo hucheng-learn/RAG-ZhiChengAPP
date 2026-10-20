@@ -13,8 +13,9 @@ router = APIRouter(prefix="/api/v1/query", tags=["query"])
 logger = logging.getLogger("zhichengapp")
 
 
-@router.post("")
+@router.post("", summary="同步课程问答")
 async def query(body: QueryRequest, request: Request, rt=Depends(runtime)):
+    """阻塞式问答：检索课程证据并返回带引用的最终回答；适合脚本与评测调用。"""
     run = await rt.query.acquire(body, request.state.request_id)
     try:
         result = await rt.query.execute(run)
@@ -32,7 +33,7 @@ def event(name, request_id, **data):
     return f"event: {name}\ndata: {payload}\n\n"
 
 
-@router.post("/stream")
+@router.post("/stream", summary="流式课程问答（SSE）")
 async def stream(body: QueryRequest, request: Request, rt=Depends(runtime)):
     """模型增量作为待核对草稿输出；done 用已校验结果替换草稿。"""
     run = await rt.query.acquire(body, request.state.request_id)
