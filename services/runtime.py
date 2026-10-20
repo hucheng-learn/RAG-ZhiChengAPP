@@ -54,25 +54,43 @@ class Runtime:
         self.vector_ready = False
 
     async def start(self):
+        # 启动模型服务
         await self.models.start()
+
+        # 缺少任一存储组件时，跳过业务资源初始化
         if self.repo is None or self.blobs is None or self.vectors is None:
             return
+
         try:
+            # 初始化数据仓库和文件存储
             await self.repo.initialize()
             await self.blobs.initialize()
+
+            # 模型无错误时，按模型的向量维度初始化向量存储
             if not self.models.error:
                 await self.vectors.initialize(self.models.dimension)
                 self.vector_ready = True
+
+            # 创建导入服务和查询服务，并传入当前运行时对象
             self.imports = ImportService(self)
             self.query = QueryService(self)
-            # 未正常结束的消息不进入下一轮上下文。
+
+            # 将上次未正常结束的消息标记为已取消，避免进入下一轮上下文
             await self.repo.update_many(
-                "messages", {"status": "processing"}, {"status": "cancelled", "finished_at": now()}
+                "messages",
+                {"status": "processing"},
+                {"status": "cancelled", "finished_at": now()},
             )
+
+            # 启动导入服务
             await self.imports.start()
+
+            # 标记存储资源已就绪，并清除业务初始化错误信息
             self.storage_ready = True
             self.error = ""
+
         except Exception as exc:
+            # 记录异常类型，并保存面向用户的错误提示
             logger.warning("business_start_failed type=%s", type(exc).__name__)
             self.error = "业务资源初始化失败，请检查基础服务后重启应用"
 

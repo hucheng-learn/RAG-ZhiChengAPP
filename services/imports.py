@@ -33,12 +33,25 @@ def now():
 
 class ImportService:
     def __init__(self, runtime):
+        # 保存运行时对象，供导入流程访问共享资源
         self.runtime = runtime
+
+        # 分别获取数据仓库、文件存储和向量存储组件
         self.repo, self.blobs, self.vectors = runtime.repo, runtime.blobs, runtime.vectors
+
+        # 获取配置，供队列初始化及后续导入流程使用
         self.settings = runtime.settings
+
+        # 创建有容量限制的异步导入队列；队列满时，await put() 会等待
         self.queue = asyncio.Queue(maxsize=self.settings.import_queue_size)
+
+        # 提交锁，用于协调并发提交操作
         self.submission_lock = asyncio.Lock()
+
+        # 保存各文档对应的锁，用于协调同一文档的并发操作
         self.document_locks = {}
+
+        # 消费者任务的引用，启动前为空
         self.consumer = None
 
     async def start(self):
@@ -660,26 +673,31 @@ class ImportService:
         return records
 
     async def _original_assets(self, version):
-        return {
-            item["path"]: await self.blobs.get(item["key"])
-            for item in version.get("original_assets", [])
-        }
+        return {item["path"]: await self.blobs.get(item["key"]) for item in version.get("original_assets", [])}
 
-    # 导入流程第一个节点
-    # 先删旧 chunks/sections/向量/附件，保证重跑幂等
-    # 再取原件按后缀分流——pdf/ppt/图片交给 MinerU，docx 在有 MinerU 时走 MinerU、否则本地`parse_docx` ，md/txt 直接解码
-    # 之后按`content_type` 分岔：`catalog` 走目录识别、`question_bank` 先本地解析（失败回落 LLM 识别）、普通文档切 section 成 chunks
-    # 空文档会直接失败
     async def parse_and_store(self, state):
-        """解析及持久化正文，State 只携带 ID 和计数，不携带整批向量。"""
+        """导入流程的解析节点：从原件重建正文、附件和业务记录。
+
+        state 至少需要 version_id 和 task_id，分别用于读取版本和更新任务进度。
+        处理顺序为：清理当前版本的旧产物 → 解析原件及图片 → 保存规范化正文
+        → 按内容类型保存目录、题目或正文切片。原件及原始附件保留，供重试使用。
+
+        目录返回课程数、零切片数和是否需要审核；其他类型返回切片数及解析得到的
+        section 数。后者的 record_count 不等同于题目数。返回值供后续流程合并到
+        State；正文存储在仓库中，向量计算和版本激活由后续节点负责。
+
+        异常交由调用方处理；普通文档和题库若未生成任何切片，会抛出 ValueError。
+        """
         version = await self.repo.get("versions", state["version_id"])
         document_id = version["document_id"]
+        # 目录重跑时先清空上一次的识别报告，避免前端展示过期的审核结果。
         if version["content_type"] == "catalog":
             await self.repo.patch("versions", version["id"], {"catalog_report": None})
             await self.repo.patch("tasks", state["task_id"], {"catalog_report": None})
         await self.repo.patch("tasks", state["task_id"], {"stage": "parsing", "progress": 10})
 
-        # 先删旧 chunks/sections/向量/附件，保证重跑幂等
+        # 仅清理当前文档的当前版本，避免重试产生重复记录；不清理其他版本。
+        # assets 是解析产物，original_assets 和 source_key 对应的原始输入继续保留。
         for collection in ("chunks", "sections", "courses", "series", "questions"):
             await self.repo.delete(
                 collection, {"document_id": document_id, "version_id": version["id"]}
@@ -690,15 +708,18 @@ class ImportService:
         await self.repo.patch("versions", version["id"], {"assets": []})
         data = await self.blobs.get(version["source_key"])
 
-        # 再取原件按后缀分流——pdf/ppt/图片交给 MinerU，docx 在有 MinerU 时走 MinerU、否则本地`parse_docx` ，md/txt 直接解码
+        # 统一得到 source（Markdown 正文）、parsed（章节及来源信息）和 assets（图片）。
+        # converted 表示经过 MinerU 转换或补入图片识别文本，后续定位需指向规范化正文。
         suffix = PurePath(version["source_name"]).suffix.lower()
         assets = await self._original_assets(version)
         converted = False
 
         async def progress(stage):
+            # MinerU 可多次回报阶段名称；转换期间进度暂固定为 12%。
             await self.repo.patch("tasks", state["task_id"], {"stage": stage, "progress": 12})
 
         if suffix in REMOTE_EXTENSIONS or (suffix == ".docx" and self.runtime.mineru.available):
+            # PDF、PPT、图片等远程格式，以及 MinerU 可用时的 Word，先转为 Markdown。
             source, extracted = await self.runtime.mineru.parse(
                 version["source_name"], data, progress
             )
@@ -706,6 +727,7 @@ class ImportService:
             converted = True
             parsed = parse_markdown(source, document_id=document_id, version_id=version["id"])
         elif suffix == ".docx":
+            # 无 MinerU 时使用本地 Word 解析器，保留章节结构并单独提取内嵌图片。
             parsed = await self.repo.call(
                 parse_docx,
                 data,
@@ -714,6 +736,7 @@ class ImportService:
                 heading_styles=self.settings.docx_heading_styles,
                 include_images=True,
             )
+            # 根据章节重建 Markdown，供目录/题目识别及规范化正文预览共同使用。
             source = "\n\n".join(
                 (
                     "#" * section.heading_level + " " + section.title + "\n"
@@ -727,17 +750,19 @@ class ImportService:
             if assets:
                 parsed.warnings.append("Word 图片已保留，当前未识别图片中的文字")
         else:
+            # Markdown/TXT 按 UTF-8 解码；utf-8-sig 同时兼容带 BOM 的文件。
             source = data.decode("utf-8-sig")
             parsed = await self.repo.call(
                 parse_markdown, source, document_id=document_id, version_id=version["id"]
             )
+        # 只处理正文引用且已上传/提取的图片；缺失引用（含未提供的外链图片）记为警告。
         refs = image_references(source)
         missing = [ref for ref in refs if ref not in assets]
         if missing:
             parsed.warnings.append(
                 f"有 {len(missing)} 张图片未随文件上传或为外部链接，未读取图片内容"
             )
-        # Markdown 自带图片时逐张识别，原图片继续保留用于练习和引用。
+        # Markdown/TXT 的关联图片在 MinerU 可用时逐张识别，原图片仍保留供练习和引用。
         if suffix in {".md", ".markdown", ".txt"} and self.runtime.mineru.available:
             recognized_images = {}
             for ref in refs:
@@ -746,13 +771,16 @@ class ImportService:
                     recognized_images[ref] = recognized
                     converted = True
             if recognized_images:
+                # 将图片文字补入正文后重新解析章节，使后续切片也能包含图片中的内容。
                 source = append_image_text(source, recognized_images)
                 parsed = parse_markdown(source, document_id=document_id, version_id=version["id"])
         if assets and not self.runtime.mineru.available and suffix in {".md", ".markdown", ".txt"}:
             parsed.warnings.append("关联图片已保存，当前未识别图片中的文字")
         if converted:
+            # 转换后的行号属于 normalized.md，不能再按原文件的行号解释。
             for section in parsed.sections:
                 section.source.format = "normalized"
+        # 保存本次解析使用的全部图片及统一的 normalized.md，并记录解析器版本和警告。
         asset_records = await self._save_assets(document_id, version["id"], assets, "parsed")
         await self.repo.patch("versions", version["id"], {"assets": asset_records})
         normalized_key = f"documents/{document_id}/{version['id']}/normalized.md"
@@ -767,12 +795,11 @@ class ImportService:
             },
         )
 
-        # 之后按`content_type` 分岔：`catalog` 走目录识别、
-        # `question_bank` 先本地解析（失败回落 LLM 识别）、普通文档切 section 成 chunks
-        # 空文档会直接失败
+        # 目录只生成系列和课程记录，提前返回，不进入正文切片和向量索引流程。
         if version["content_type"] == "catalog":
 
             async def progress(index, total):
+                # index 表示已完成批次数；尚未完成时，另记录即将处理的批次及开始时间。
                 await self.repo.patch(
                     "tasks",
                     state["task_id"],
@@ -802,11 +829,13 @@ class ImportService:
                 for record in records:
                     await self.repo.put(collection, record)
             await self.repo.patch("tasks", state["task_id"], {"catalog_report": report})
+            # 有识别问题时保留记录及报告，由后续流程决定进入审核而非直接激活。
             return {
                 "chunk_count": 0,
                 "record_count": len(courses),
                 "catalog_needs_review": bool(report["issues"]),
             }
+        # 题库和普通文档共用模型的 tokenizer，按 token 预算切片，并附上检索所需归属。
         self.runtime.require_models()
         course_name = ""
         if version.get("course_id"):
@@ -824,6 +853,7 @@ class ImportService:
         metadata["course_name"] = course_name
         chunks = 0
         if version["content_type"] == "question_bank":
+            # 优先按本地规则提取结构化题目；仅在规则解析抛出 ValueError 时回落到 LLM。
             try:
                 questions = await self.repo.call(
                     parse_questions, source, document_id, version["id"], version.get("course_id")
@@ -846,8 +876,10 @@ class ImportService:
             from markdown_it import MarkdownIt
 
             image_env = {}
+            # 解析全文的引用定义，使题干、选项、答案中的引用式图片也能正确解析。
             MarkdownIt("commonmark").parse(source, image_env)
             for index, question in enumerate(questions):
+                # 题面图片和答案解析图片分开保存，便于练习时控制答案展示。
                 question["images"] = image_references(
                     question["stem"] + "\n" + question["options"], dict(image_env)
                 )
@@ -856,6 +888,8 @@ class ImportService:
                 )
                 question["project_id"] = version.get("project_id")
                 await self.repo.put("questions", question)
+                # 检索正文由题干、选项及知识点组成；答案和解析保存在题目记录中。
+                # 此 Section 仅作为切片输入，不单独写入 sections 集合。
                 section = Section(
                     section_id=question["id"],
                     document_id=document_id,
@@ -886,13 +920,14 @@ class ImportService:
                     await self.repo.put("chunks", chunk)
                     chunks += 1
         else:
+            # 普通文档先保存章节，再逐章切片；切片计数供后续索引及数量校验使用。
             for section in parsed.sections:
                 await self.repo.put("sections", {"id": section.section_id, **section.model_dump()})
                 for chunk in await self.repo.call(chunker.split, section, metadata):
                     await self.repo.put("chunks", chunk)
                     chunks += 1
         
-        # 空文档会直接失败
+        # 没有可索引正文时终止流程，避免后续将一个空索引版本标记为可用。
         if not chunks:
             raise ValueError("未提取到可索引正文")
         return {"chunk_count": chunks, "record_count": len(parsed.sections)}

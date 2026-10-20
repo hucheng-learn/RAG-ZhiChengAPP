@@ -8,8 +8,10 @@ from schemas.document import ParsedDocument, Section, SourceLocation
 def parse_markdown(source: str, *, document_id: str, version_id: str) -> ParsedDocument:
     """只认文档顶层标题，保留前言、重复标题和原始行位置，不承担 token 切片。"""
     lines = source.splitlines(keepends=True)
+    # 按 CommonMark 规范初始化解析器、显式开启表格支持、将 Markdown 源码解析为 token 序列。
     tokens = MarkdownIt("commonmark").enable("table").parse(source)
     headings = []
+    # 提取顶层标题
     for index, token in enumerate(tokens):
         if token.type == "heading_open" and token.level == 0 and token.map is not None:
             headings.append(
@@ -19,10 +21,15 @@ def parse_markdown(source: str, *, document_id: str, version_id: str) -> ParsedD
     sections = []
     stack: list[Section] = []
 
+    # 闭包
     def append(start, end, level=0, title="", heading_start=None):
+        # 用栈来维护标题层级树
+        # 遇到新标题 level，把栈顶所有级别 ≥ 当前的节点弹出
+        # 弹出后栈顶就是当前标题的父节点（如果栈空则无父）
         while stack and stack[-1].heading_level >= level:
             stack.pop()
         parent = stack[-1] if stack else None
+
         section = Section(
             section_id=f"{document_id}:{version_id}:s{len(sections)}",
             parent_section_id=parent.section_id if parent else None,
